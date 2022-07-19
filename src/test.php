@@ -2,11 +2,6 @@
 
 namespace App;
 
-require_once __DIR__ . './../vendor/autoload.php';
-
-use Aws\S3\S3Client;
-use GuzzleHttp\Client;
-use Optimus\Utils\IdGenerator;
 use SQLite3;
 
 $db = new SQLite3('mydb.db');
@@ -20,73 +15,29 @@ $db->exec("CREATE TABLE IF NOT EXISTS logs (
     createdAt TEXT DEFAULT CURRENT_TIMESTAMP
 )");
 
-if (isset($_POST["submit"]) && isset($_FILES['fileToUpload']) && $_FILES['fileToUpload']['type'] == 'video/mp4') {
-    $idGenerator = new IdGenerator();
-    $httpClient = new Client();
-
-    $extension = pathinfo($_FILES['fileToUpload']['name'], PATHINFO_EXTENSION);
-    $uuid = $idGenerator->generate();
-    $fileKey = $extension ? $uuid . '.' . $extension : $uuid;
-
-    $s3Client = new S3Client(
-        [
-            'version' => 'latest',
-            'region' => $_ENV["S3_CLIENT_REGION"],
-            'credentials' => [
-                'key' => $_ENV["S3_CLIENT_KEY"],
-                'secret' => $_ENV["S3_CLIENT_SECRET"],
-            ],
-        ]
-    );
-
-    $cmd = $s3Client->getCommand('PutObject', [
-        'Bucket' => 'budsies-staging-qa-photos',
-        'Key' => $fileKey,
-    ]);
-
-    $s3TimeStart = microtime(true);
-
-    $presignedRequest = $s3Client->createPresignedRequest($cmd, "+120 seconds");
-
-    $s3Response = $httpClient->request(
-        'PUT',
-        $presignedRequest->getUri(),
-        [
-            'body' => file_get_contents($_FILES['fileToUpload']['tmp_name']),
-            'headers' => [
-                'Content-Type' => 'video/mp4',
-            ],
-        ]
-    );
-
-    $s3TimeEnd = microtime(true);
-
-    $s3UploadExecuteTime = $s3TimeEnd - $s3TimeStart;
-
-    $requestTime = microtime(true) - $_SERVER['REQUEST_TIME_FLOAT'];
-
+if (isset($_FILES['fileToUpload']) && $_FILES['fileToUpload']['type'] == 'video/mp4' && isset($_POST['s3UploadTime']) && isset($_POST['budsiesUploadTime'])) {
     $stmt = $db->prepare('INSERT INTO logs (
-            server, file, size, statusCode, time
-        ) VALUES (
-            :server, :file, :size, :statusCode, :time
-        )');
+        server, file, size, statusCode, time
+    ) VALUES (
+        :server, :file, :size, :statusCode, :time
+    )');
     $stmt->bindValue(':server', 'S3');
     $stmt->bindValue(':file', (string)$_FILES['fileToUpload']['name']);
     $stmt->bindValue(':size', (string)$_FILES['fileToUpload']['size']);
-    $stmt->bindValue(':statusCode', (string)$s3Response->getStatusCode());
-    $stmt->bindValue(':time', (string)round($s3UploadExecuteTime, 2));
+    $stmt->bindValue(':statusCode', (string)200);
+    $stmt->bindValue(':time', (string)round((float)$_POST['s3UploadTime'], 2));
     $stmt->execute();
 
     $stmt = $db->prepare('INSERT INTO logs (
-            server, file, size, statusCode, time
-        ) VALUES (
-            :server, :file, :size, :statusCode, :time
-        )');
+        server, file, size, statusCode, time
+    ) VALUES (
+        :server, :file, :size, :statusCode, :time
+    )');
     $stmt->bindValue(':server', 'Budsies');
     $stmt->bindValue(':file', (string)$_FILES['fileToUpload']['name']);
     $stmt->bindValue(':size', (string)$_FILES['fileToUpload']['size']);
     $stmt->bindValue(':statusCode', (string)200);
-    $stmt->bindValue(':time', (string)round($requestTime - $s3UploadExecuteTime, 2));
+    $stmt->bindValue(':time', (string)round((float)$_POST['budsiesUploadTime'], 2));
     $stmt->execute();
 }
 
@@ -97,14 +48,14 @@ if (isset($_POST["submit"]) && isset($_FILES['fileToUpload']) && $_FILES['fileTo
 
 <body>
 
-    <form action="test.php" method="post" enctype="multipart/form-data">
+    <p>
         Select mp4 video to upload:
         <input type="file" name="fileToUpload" id="fileToUpload" required accept="video/mp4">
-        <input type="submit" value="Upload" name="submit">
-    </form>
+        <button id="upload-button" onclick="uploadFile()"> Upload </button>
+    </p>
 
     <?php
-        echo "
+    echo "
         <br>
         <table>
             <tr>
@@ -116,10 +67,10 @@ if (isset($_POST["submit"]) && isset($_FILES['fileToUpload']) && $_FILES['fileTo
                 <th>Uploaded At</th>
             </tr>";
 
-        $result = $db->query('SELECT * FROM logs ORDER BY id DESC');
+    $result = $db->query('SELECT * FROM logs ORDER BY id DESC');
 
-        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
-            echo "
+    while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+        echo "
             <tr>
                 <td>{$row['server']}</td>
                 <td>{$row['file']}</td>
@@ -129,10 +80,69 @@ if (isset($_POST["submit"]) && isset($_FILES['fileToUpload']) && $_FILES['fileTo
                 <td>{$row['createdAt']}</td>
             </tr>
             ";
+    }
+
+    echo "</table>";
+    ?>
+
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1178.0.min.js"></script>
+    <script>
+        AWS.config.update({
+            region: '<?php echo $_ENV["S3_CLIENT_REGION"]; ?>',
+            credentials: new AWS.Credentials('<?php echo $_ENV["S3_CLIENT_KEY"]; ?>', '<?php echo $_ENV["S3_CLIENT_SECRET"]; ?>')
+        });
+
+        var s3 = new AWS.S3({
+            apiVersion: '2006-03-01',
+            params: { Bucket: 'budsies-staging-qa-photos' }
+        });
+
+        async function uploadFile() {
+            let formData = new FormData();
+            formData.append("fileToUpload", fileToUpload.files[0]);
+            let budsiesStartTime = Date.now();
+            await fetch('/test.php', {
+                method: "POST",
+                body: formData
+            });
+            let budsiesEndTime = Date.now();
+
+            let s3StartTime, s3EndTime = 0;
+            var reader = new FileReader();
+            reader.onload = function() {
+                s3StartTime = Date.now();
+                s3.putObject({
+                    Body: reader.result,
+                    Bucket: "budsies-staging-qa-photos",
+                    Key: uuidv4() + '.mp4'
+                }, async function(err, data) {
+                    s3EndTime = Date.now();
+                    if (err) {console.log(err, err.stack); return;}
+                    else console.log(data); // successful response
+
+                    let resultData = new FormData();
+                    resultData.append("fileToUpload", fileToUpload.files[0]);
+                    resultData.append("s3UploadTime", (s3EndTime - s3StartTime) / 1000);
+                    resultData.append("budsiesUploadTime", (budsiesEndTime - budsiesStartTime) / 1000);
+                    await fetch('/test.php', {
+                        method: "POST",
+                        body: resultData
+                    });
+
+                    alert('The file has been uploaded successfully.');
+
+                    window.location.reload();
+                });
+            };
+            fileToSave = reader.readAsBinaryString(fileToUpload.files[0]);
         }
 
-        echo "</table>";
-    ?>
+        function uuidv4() {
+            return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+            );
+        }
+    </script>
 
 </body>
 
